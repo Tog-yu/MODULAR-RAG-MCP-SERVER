@@ -7,26 +7,30 @@
 # =============================================================================
 llm:
   provider: "openai"  # Options: openai, azure, ollama, deepseek
-  model: "gpt-4o"
-  deployment_name: "gpt-4o"
-  azure_endpoint: "https://YOUR_ENDPOINT.openai.azure.com/"
-  api_version: "2024-02-15-preview"
-  api_key: "YOUR_API_KEY_HERE"
+  model: "Qwen3.6-35B-A3B-mxfp4"
+  base_url: "http://localhost:8000/v1"  # oMLX 本地服务
+  api_key: "1234"
   temperature: 0.0
   max_tokens: 4096
+  # Azure-compatible settings (not used with oMLX):
+  # deployment_name: "gpt-4o"
+  # azure_endpoint: "https://YOUR_ENDPOINT.openai.azure.com/"
+  # api_version: "2024-02-15-preview"
 
 # =============================================================================
 # Embedding Configuration
 # =============================================================================
 embedding:
-  provider: "openai"  # Options: openai, azure, ollama
-  model: "text-embedding-ada-002"
-  dimensions: 1536  # text-embedding-ada-002 固定维度 (不传递给API, 仅用于验证)
+  provider: "ollama"  # Options: openai, azure, ollama
+  model: "bge-m3"
+  dimensions: 1024  # bge-m3 固定 1024 维
+  # Ollama-specific settings:
+  base_url: "http://localhost:11434"
   # Azure-compatible settings (azure_endpoint triggers Azure compat mode):
-  azure_endpoint: "https://YOUR_ENDPOINT.openai.azure.com/"
-  deployment_name: "text-embedding-ada-002"
-  api_version: "2024-02-15-preview"
-  api_key: "YOUR_API_KEY_HERE"
+  # azure_endpoint: "https://YOUR_ENDPOINT.openai.azure.com/"
+  # deployment_name: "text-embedding-ada-002"
+  # api_version: "2024-02-15-preview"
+  # api_key: "YOUR_API_KEY_HERE"
   # OpenAI-specific settings (if provider is openai):
   # api_key: "YOUR_API_KEY_HERE"
 
@@ -34,14 +38,15 @@ embedding:
 # Vision LLM Configuration (for Image Captioning)
 # =============================================================================
 vision_llm:
-  enabled: true  # Set to true to enable vision capabilities
+  enabled: false  # Set to true to enable vision capabilities (requires Vision LLM)
   provider: "openai"  # Options: openai, azure, ollama
-  model: "gpt-4o"  # Options: gpt-4o, gpt-4-vision-preview (OpenAI), llava (Ollama)
+  model: "gpt-4o"
+  base_url: "http://localhost:8000/v1"
+  api_key: "1234"
   # Azure-compatible settings (azure_endpoint triggers Azure compat mode):
-  azure_endpoint: "https://YOUR_ENDPOINT.openai.azure.com/"
-  deployment_name: "gpt-4o"
-  api_version: "2024-02-15-preview"
-  api_key: "YOUR_API_KEY_HERE"
+  # azure_endpoint: "https://YOUR_ENDPOINT.openai.azure.com/"
+  # deployment_name: "gpt-4o"
+  # api_version: "2024-02-15-preview"
   # Ollama-specific settings (if provider is ollama):
   # base_url: "http://localhost:11434"
   max_image_size: 2048  # Max dimension (width/height) for image compression
@@ -103,10 +108,10 @@ ingestion:
   
   # Chunk Refiner Configuration (C5)
   chunk_refiner:
-    use_llm: true  # Set to true to enable LLM-based refinement (requires LLM config)
+    use_llm: false  # Set to true to enable LLM-based refinement (requires LLM config)
     # When use_llm is false or LLM call fails, falls back to rule-based refinement
-  
+
   # Metadata Enricher Configuration (C6)
   metadata_enricher:
-    use_llm: true  # Set to true to enable LLM-based enrichment (requires LLM config)
+    use_llm: false  # Set to true to enable LLM-based enrichment (requires LLM config)
     # When use_llm is false or LLM call fails, falls back to rule-based enrichment
