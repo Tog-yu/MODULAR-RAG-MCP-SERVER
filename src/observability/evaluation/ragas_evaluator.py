@@ -212,6 +212,7 @@ class RagasEvaluator(BaseEvaluator):
         llm_cfg = self.settings.llm
         provider = llm_cfg.provider.lower()
         llm_azure_endpoint = getattr(llm_cfg, "azure_endpoint", None)
+        llm_base_url = getattr(llm_cfg, "base_url", None)
 
         # Azure-compatible mode: if azure_endpoint is configured, use Azure
         # client even when provider is "openai" (matches project convention).
@@ -227,7 +228,11 @@ class RagasEvaluator(BaseEvaluator):
                 api_version=getattr(llm_cfg, "api_version", None) or "2024-02-15-preview",
             )
         elif provider == "openai":
-            llm_client = AsyncOpenAI(api_key=llm_cfg.api_key)
+            # Honour a local OpenAI-compatible endpoint (e.g. oMLX) via base_url.
+            llm_client = AsyncOpenAI(
+                api_key=llm_cfg.api_key,
+                base_url=llm_base_url if llm_base_url else None,
+            )
         else:
             raise ValueError(
                 f"Unsupported LLM provider for Ragas: '{provider}'. "
@@ -240,6 +245,7 @@ class RagasEvaluator(BaseEvaluator):
         emb_cfg = self.settings.embedding
         emb_provider = emb_cfg.provider.lower()
         emb_azure_endpoint = getattr(emb_cfg, "azure_endpoint", None)
+        emb_base_url = getattr(emb_cfg, "base_url", None)
 
         # Same Azure-compatible mode detection for embeddings
         use_azure_emb = (
@@ -247,18 +253,31 @@ class RagasEvaluator(BaseEvaluator):
             or (emb_provider == "openai" and emb_azure_endpoint)
         )
 
-        if use_azure_emb:
+        if emb_provider == "ollama":
+            # Ollama exposes an OpenAI-compatible embeddings endpoint at
+            # <base_url>/v1. Append "/v1" if the configured base_url omits it.
+            ollama_base = emb_base_url or "http://localhost:11434"
+            if not ollama_base.rstrip("/").endswith("/v1"):
+                ollama_base = ollama_base.rstrip("/") + "/v1"
+            emb_client = AsyncOpenAI(
+                api_key=getattr(emb_cfg, "api_key", None) or "ollama",
+                base_url=ollama_base,
+            )
+        elif use_azure_emb:
             emb_client = AsyncAzureOpenAI(
                 api_key=emb_cfg.api_key,
                 azure_endpoint=emb_azure_endpoint or emb_cfg.azure_endpoint,
                 api_version=getattr(emb_cfg, "api_version", None) or "2024-02-15-preview",
             )
         elif emb_provider == "openai":
-            emb_client = AsyncOpenAI(api_key=emb_cfg.api_key)
+            emb_client = AsyncOpenAI(
+                api_key=emb_cfg.api_key,
+                base_url=emb_base_url if emb_base_url else None,
+            )
         else:
             raise ValueError(
                 f"Unsupported embedding provider for Ragas: '{emb_provider}'. "
-                "Supported: azure, openai"
+                "Supported: azure, openai, ollama"
             )
 
         embeddings = OpenAIEmbeddings(model=emb_cfg.model, client=emb_client)
