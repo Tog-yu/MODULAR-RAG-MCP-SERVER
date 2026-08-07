@@ -13,6 +13,7 @@ Design Principles:
 
 from __future__ import annotations
 
+import hashlib
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional
@@ -79,3 +80,22 @@ class BaseLoader(ABC):
         if not path.is_file():
             raise ValueError(f"Path is not a file: {path}")
         return path
+
+    @staticmethod
+    def _compute_file_hash(file_path: str | Path) -> str:
+        """Compute SHA256 hash of file content.
+
+        Used to derive a stable, idempotent document id and to coordinate
+        image storage directories across loaders (PDF, Markdown, ...).
+
+        Args:
+            file_path: Path to the file.
+
+        Returns:
+            Hex string of the SHA256 hash (64 chars).
+        """
+        sha256 = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                sha256.update(chunk)
+        return sha256.hexdigest()

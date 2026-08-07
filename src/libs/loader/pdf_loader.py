@@ -12,7 +12,6 @@ Features:
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -137,21 +136,6 @@ class PdfLoader(BaseLoader):
             text=text_content,
             metadata=metadata
         )
-    
-    def _compute_file_hash(self, file_path: Path) -> str:
-        """Compute SHA256 hash of file content.
-        
-        Args:
-            file_path: Path to file.
-            
-        Returns:
-            Hex string of SHA256 hash.
-        """
-        sha256 = hashlib.sha256()
-        with open(file_path, 'rb') as f:
-            for chunk in iter(lambda: f.read(8192), b''):
-                sha256.update(chunk)
-        return sha256.hexdigest()
     
     def _extract_title(self, text: str) -> Optional[str]:
         """Extract title from first Markdown heading or first non-empty line.

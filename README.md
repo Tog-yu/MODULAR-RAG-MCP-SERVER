@@ -39,7 +39,7 @@
 
 | 模块 | 能力 | 说明 |
 |------|------|------|
-| **Ingestion Pipeline** | PDF → Markdown → Chunk → Transform → Embedding → Upsert | 全链路数据摄取，支持多模态图片描述（Image Captioning） |
+| **Ingestion Pipeline** | PDF / Markdown → Chunk → Transform → Embedding → Upsert | 全链路数据摄取，支持多模态图片描述（Image Captioning）；Loader 按扩展名经 `LoaderFactory` 自动派发 |
 | **Hybrid Search** | Dense (向量) + Sparse (BM25) + RRF Fusion + Rerank | 粗排召回 + 精排重排的两段式检索架构 |
 | **MCP Server** | 标准 MCP 协议暴露 Tools | `query_knowledge_hub`、`list_collections`、`get_document_summary` |
 | **Dashboard** | Streamlit 六页面管理平台 | 系统总览 / 数据浏览 / Ingestion 管理 / 摄取追踪 / 查询追踪 / 评估面板 |
@@ -358,9 +358,11 @@ Skill 采用 **"写作原则 + 项目亮点 + 用户画像 = 定制化简历"** 
 
 ### 4. 想摄取 PDF 以外的文档格式（Word / Markdown / HTML 等）怎么办？
 
-**直接问 AI 帮你扩展即可。**
+**Markdown 已原生支持，其余格式直接问 AI 帮你扩展即可。**
 
-项目的 Loader 层采用了可插拔的抽象设计（`BaseLoader`），目前默认实现了 PDF Loader。如果你需要支持 Word、Markdown、HTML 等其他格式，整体架构已经设计好了扩展点，让 AI 帮你新增一个对应的 Loader 实现就可以了。
+项目的 Loader 层采用了可插拔的抽象设计（`BaseLoader`），并通过 `LoaderFactory` 按扩展名自动派发。目前内置实现了 **PDF** 与 **Markdown**（`.md` / `.markdown`）两种 Loader——Markdown 直接读取原始文本、解析 frontmatter/标题大纲，并复用与 PDF 一致的多模态图片链路（本地图片复制到 `data/images` 并插入 `[IMAGE: {id}]` 占位符）。
+
+如果你还需要支持 Word、HTML 等其他格式，整体架构已经设计好了扩展点：让 AI 帮你新增一个对应的 `BaseLoader` 实现并调用 `LoaderFactory.register(...)` 即可，无需改动 pipeline。
 
 比如告诉 AI："帮我新增一个 Word 文档的 Loader，参考现有的 PDF Loader 实现"，AI 完全可以搞定。
 

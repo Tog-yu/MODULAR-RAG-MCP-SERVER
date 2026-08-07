@@ -178,6 +178,19 @@ class IngestionSettings:
 
 
 @dataclass(frozen=True)
+class LoaderSettings:
+    """Configuration for document loaders (extension dispatch).
+
+    Attributes:
+        extract_markdown_images: Whether the Markdown loader copies local
+            images into the image store and inserts ``[IMAGE: {id}]``
+            placeholders (mirrors the PDF loader's multimodal flow).
+    """
+
+    extract_markdown_images: bool = True
+
+
+@dataclass(frozen=True)
 class Settings:
     llm: LLMSettings
     embedding: EmbeddingSettings
@@ -188,6 +201,7 @@ class Settings:
     observability: ObservabilitySettings
     ingestion: Optional[IngestionSettings] = None
     vision_llm: Optional[VisionLLMSettings] = None
+    loader: Optional[LoaderSettings] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Settings":
@@ -227,6 +241,13 @@ class Settings:
                 azure_endpoint=vision_llm.get("azure_endpoint"),
                 deployment_name=vision_llm.get("deployment_name"),
                 base_url=vision_llm.get("base_url"),
+            )
+
+        loader_settings = None
+        if "loader" in data:
+            loader = _require_mapping(data, "loader", "settings")
+            loader_settings = LoaderSettings(
+                extract_markdown_images=bool(loader.get("extract_markdown_images", True)),
             )
 
         settings = cls(
@@ -281,6 +302,7 @@ class Settings:
             ),
             ingestion=ingestion_settings,
             vision_llm=vision_llm_settings,
+            loader=loader_settings,
         )
 
         return settings

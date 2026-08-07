@@ -27,7 +27,7 @@ from src.observability.logger import get_logger
 
 # Libs layer imports
 from src.libs.loader.file_integrity import SQLiteIntegrityChecker
-from src.libs.loader.pdf_loader import PdfLoader
+from src.libs.loader.loader_factory import LoaderFactory
 from src.libs.embedding.embedding_factory import EmbeddingFactory
 from src.libs.vector_store.vector_store_factory import VectorStoreFactory
 
@@ -141,12 +141,16 @@ class IngestionPipeline:
         self.integrity_checker = SQLiteIntegrityChecker(db_path=str(resolve_path("data/db/ingestion_history.db")))
         logger.info("  ✓ FileIntegrityChecker initialized")
         
-        # Stage 2: Loader
-        self.loader = PdfLoader(
-            extract_images=True,
-            image_storage_dir=str(resolve_path(f"data/images/{collection}"))
+        # Stage 2: Loader (selected per-file by extension via LoaderFactory)
+        self._image_storage_dir = str(resolve_path(f"data/images/{collection}"))
+        self._extract_markdown_images = (
+            settings.loader.extract_markdown_images
+            if settings.loader is not None
+            else True
         )
-        logger.info("  ✓ PdfLoader initialized")
+        logger.info(
+            f"  ✓ LoaderFactory ready (supports: {', '.join(LoaderFactory.supported_extensions())})"
+        )
         
         # Stage 3: Chunker
         self.chunker = DocumentChunker(settings)
@@ -255,25 +259,34 @@ class IngestionPipeline:
             _notify("load", 2)
             
             _t0 = time.monotonic()
-            document = self.loader.load(str(file_path))
+            # Select loader by file extension (format-agnostic dispatch).
+            loader = LoaderFactory.get_loader(
+                str(file_path),
+                image_storage_dir=self._image_storage_dir,
+                extract_images=True,
+                extract_markdown_images=self._extract_markdown_images,
+            )
+            document = loader.load(str(file_path))
             _elapsed = (time.monotonic() - _t0) * 1000.0
             
             text_preview = document.text[:200].replace('\n', ' ') + "..." if len(document.text) > 200 else document.text
             image_count = len(document.metadata.get("images", []))
             
             logger.info(f"  Document ID: {document.id}")
+            logger.info(f"  Loader: {type(loader).__name__}")
             logger.info(f"  Text length: {len(document.text)} chars")
             logger.info(f"  Images extracted: {image_count}")
             logger.info(f"  Preview: {text_preview[:100]}...")
             
             stages["loading"] = {
                 "doc_id": document.id,
+                "loader": type(loader).__name__,
                 "text_length": len(document.text),
                 "image_count": image_count
             }
             if trace is not None:
                 trace.record_stage("load", {
-                    "method": "markitdown",
+                    "method": type(loader).__name__,
                     "doc_id": document.id,
                     "text_length": len(document.text),
                     "image_count": image_count,

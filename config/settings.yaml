@@ -115,3 +115,14 @@ ingestion:
   metadata_enricher:
     use_llm: false  # Set to true to enable LLM-based enrichment (requires LLM config)
     # When use_llm is false or LLM call fails, falls back to rule-based enrichment
+
+# =============================================================================
+# Loader Configuration
+# =============================================================================
+# Extension-based dispatch is handled by LoaderFactory (registered loaders:
+# .pdf -> PdfLoader, .md/.markdown -> MarkdownLoader). This block tunes loader
+# behavior only.
+loader:
+  extract_markdown_images: true  # Copy local images from Markdown into the image store
+                                 # and insert [IMAGE: {id}] placeholders (multimodal flow)
+
