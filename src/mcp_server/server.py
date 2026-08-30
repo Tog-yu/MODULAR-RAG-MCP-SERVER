@@ -123,7 +123,24 @@ def run_stdio_server() -> int:
 
 
 def main() -> int:
-    """Entry point for stdio MCP server."""
+    """Entry point. Default stdio; pass ``--transport http`` for streamable-http."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Modular RAG MCP server")
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "http"],
+        default="stdio",
+        help="stdio (default) or streamable-http",
+    )
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
+    args = parser.parse_args()
+
+    if args.transport == "http":
+        from src.mcp_server.http_server import run_http_server
+
+        return run_http_server(args.host, args.port)
     return run_stdio_server()
 
 
