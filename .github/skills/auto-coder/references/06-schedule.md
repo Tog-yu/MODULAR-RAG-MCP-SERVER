@@ -72,6 +72,7 @@
 |---------|---------|------|---------|------|
 | C1 | 定义核心数据类型/契约（Document/Chunk/ChunkRecord） | [x] | 2026-01-30 | Document/Chunk/ChunkRecord + 18个单元测试 |
 | C2 | 文件完整性检查（SHA256） | [x] | 2026-01-30 | FileIntegrityChecker + SQLiteIntegrityChecker + 25个单元测试 |
+| C2.5 | 文档质量预检（Quality Gate） | [x] | 2026-09-16 | DocumentQualityGate(fitz采样+双指标80%/50%)+Pipeline Stage 1.5+rejected字段+30单元测试+进度测试适配 |
 | C3 | Loader 抽象基类与 PDF Loader | [x] | 2026-01-30 | BaseLoader + PdfLoader + PyMuPDF图片提取 + 21单元测试 + 9集成测试 |
 | C4 | Splitter 集成（调用 Libs） | [x] | 2026-01-31 | DocumentChunker + 19个单元测试 + 5个核心增值功能 |
 | C5 | Transform 基类 + ChunkRefiner | [x] | 2026-01-31 | BaseTransform + ChunkRefiner (Rule + LLM) + TraceContext + 25单元测试 + 5集成测试 |
@@ -476,6 +477,68 @@
   - 支持并发写入（SQLite WAL模式）
 - **测试方法**：`pytest -q tests/unit/test_file_integrity.py`。
 
+### C2.5：文档质量预检（Document Quality Gate）
+- **目标**：在 Loader 全量解析之前增加一轮轻量质量预检（quality pre-check）。文档进入系统后不直接无脑解析，而是先提取前几页文本，计算**有效字符占比**和**可识别文本密度**；低于阈值的文档直接拒绝入库，避免脏数据（如扫描件、乱码 PDF）污染知识库，并在 Dashboard 上给用户明确提示：**"该文档质量不达标，请检查后重新上传"**。与其让脏数据污染整个知识库，不如在入口就拦住。
+- **设计动机**：文本层有严重问题的 PDF（扫描件无 OCR 层、编码错乱、伪 PDF）即使硬塞进 pipeline，后面切出来的 chunk 也是垃圾，检索质量根本无法保证。入口拦截的成本（毫秒级抽样）远低于事后清洗（删除已入库的 chunk / 向量 / BM25 索引）。
+- **Pipeline 插入位置**：Stage 1（Integrity Check）与 Stage 2（Load）之间，作为 **Stage 1.5: Quality Check**。放在 Loader 之前的理由：① 预检只需抽样前几页，不做全量解析，失败成本最低；② 拒绝后不产生 Document/图片提取等副作用（image_storage 目录不会被写入）。
+
+```
+Stage 1 Integrity → Stage 1.5 Quality Gate → Stage 2 Load → Stage 3 Chunking → ...
+                        │
+                        └─ 不达标 → PipelineResult(success=False, rejected=True)
+                                    + mark_failed(reason="quality_rejected")
+                                    + Dashboard 提示用户重新上传
+```
+
+#### 质量指标定义（采样范围：前 `preview_pages` 页，默认 3 页）
+
+| 指标 | 计算方式 | 阈值（默认） | 不达标含义 |
+|------|---------|------------|-----------|
+| `valid_char_ratio` 有效字符占比 | `(中文字符 + 字母 + 数字) / 非空白字符总数`（按采样文本聚合） | `≥ 0.80` | 文本层严重损坏：乱码、控制字符、错误编码占主导，即使入库切出的 chunk 也是垃圾 |
+| `text_density` 可识别文本密度 | 采样页中「有效文本页」占比；有效文本页 = 该页提取文本的有效字符数 `≥ min_chars_per_page`（默认 50） | `≥ 0.50` | 疑似扫描件/纯图片页（如无 OCR 层的扫描 PDF）：绝大多数页面无文本层 |
+| `parse_ok` 解析可行性 | fitz 能正常打开且抽到 ≥1 页 | 必须通过 | 文件损坏或非合法 PDF |
+
+两个阈值指标**同时达标**才放行；`parse_ok` 不通过直接拒绝。
+
+- **修改文件**：
+  - `src/libs/loader/quality_gate.py`（新增：核心实现）
+  - `src/core/settings.py`（`LoaderSettings` 增加 `quality_gate` 可选嵌套配置）
+  - `config/settings.yaml`（新增 quality_gate 配置节）
+  - `src/ingestion/pipeline.py`（插入 Stage 1.5；`PipelineResult` 增加 `rejected: bool` 字段；`_total_stages` 6→7）
+  - `tests/unit/test_quality_gate.py`（新增）
+  - `tests/fixtures/low_quality.pdf`、`tests/fixtures/scan_like.pdf`（新增：低质量样例）
+- **实现类/函数**：
+  - `QualityGateConfig` dataclass：`enabled: bool = True`、`min_valid_char_ratio: float = 0.80`、`min_text_density: float = 0.50`、`preview_pages: int = 3`、`min_chars_per_page: int = 50`、`max_sample_chars: int = 20000`（防超长页爆内存）
+  - `DocumentQualityGate.__init__(config: QualityGateConfig)`
+  - `DocumentQualityGate.check(file_path: str | Path) -> QualityCheckResult`
+  - `QualityCheckResult` dataclass：`passed: bool`、`valid_char_ratio: float`、`text_density: float`、`sampled_pages: int`、`reason: Optional[str]`（人话拒绝理由，直接透传给 Dashboard）
+  - `DocumentQualityGate._extract_sample_text(file_path) -> list[str]`（fitz 逐页抽取，返回每页文本）
+  - `DocumentQualityGate._compute_valid_char_ratio(text: str) -> float`（Unicode 范围判断：`\u4e00-\u9fff` CJK、`isalnum()` 字母数字）
+- **作用域（按扩展名注册）**：预检按扩展名分派，与 `LoaderFactory` 的注册风格一致。默认只注册 `.pdf`（Markdown/纯文本文件几乎不存在文本层问题，`enabled=True` 时对未注册格式直接放行，避免误杀）。
+- **Pipeline 集成要点**：
+  - 拒绝时**不能**抛异常走 except 分支——拒绝是预期业务结果而非故障。在 `run()` 内显式构造 `PipelineResult(success=False, rejected=True, error=reason)` 返回。
+  - 但仍需调用 `self.integrity_checker.mark_failed(file_hash, str(file_path), reason="quality_rejected")`，让历史表记住"此文件因质量不达标被拒"，防止每次 ingest 都重复预检同一坏文件时没有记录可查（`force=True` 重传修复版后 hash 变化，自然重新走全流程）。
+  - `stages["quality_check"]` 写入两个指标值 + sampled_pages，供 Trace（F4 Ingestion 打点）和 Dashboard（G4/G5 页面）展示；`QualityCheckResult.reason` 原样进 `PipelineResult.error`，前端零转换。
+- **降级与边界**：
+  - fitz 未安装 / 打开失败 → 按 `parse_ok` 不通过拒绝（与 PdfLoader 的降级不同：Loader 只丢图片提取，预检失败是整体拒绝）。
+  - 采样页数 > 实际页数：按实际页数算（1 页 PDF 且该页有文本也应放行）。
+  - `enabled: false` 时 Stage 1.5 直接跳过，等价于现状，用于排查误杀时做对照。
+  - 图片占位符 `[IMAGE: ...]` 出现在采样文本中属正常，占位符内的 ASCII 字符计入有效字符，不影响 ratio 判定。
+- **测试方法**：`pytest -q tests/unit/test_quality_gate.py`
+- **测试建议**：
+  - 正常文本 PDF（fixtures 已有）→ passed=True
+  - 乱码 PDF（`low_quality.pdf`：用 fitz 生成填充大量非 CJK/字母数字字符的页面）→ valid_char_ratio < 0.80 → rejected
+  - 扫描件模拟（`scan_like.pdf`：多页几乎无文本层）→ text_density < 0.50 → rejected
+  - 1 页但文本正常的小 PDF → 不因页数少误杀
+  - 阈值边界值：ratio 恰好 0.80 → passed（`>=` 判定）
+  - `enabled=False` → 直接放行
+  - Pipeline 集成：mock QualityGate 返回不通过 → PipelineResult.rejected=True、stages 含 quality_check、integrity 表有 quality_rejected 记录
+- **验收标准**：
+  - 低质量 PDF 在 Loader 之前被拦截，不产生任何 Document/图片/索引副作用
+  - Dashboard / PipelineResult 中有用户可读的拒绝提示："该文档质量不达标，请检查后重新上传"（可附指标明细）
+  - 阈值、开关、采样页数全部可配置，改 settings.yaml 无需改代码
+  - 正常文档预检耗时可忽略（< 100ms 量级，仅抽样 3 页）
+
 ### C3：Loader 抽象基类与 PDF Loader 壳子
 - **目标**：在Libs中定义 `BaseLoader`，并实现 `PdfLoader` 的最小行为。
 - **修改文件**：
@@ -505,12 +568,13 @@
   - **职责边界说明**：
     - `libs.splitter`：纯文本切分工具（`str → List[str]`），不涉及业务对象
     - `DocumentChunker`：业务适配器（`Document对象 → List[Chunk对象]`），添加业务逻辑
-  - **5 个增值功能**：
+  - **6 个增值功能**：
     1. **Chunk ID 生成**：为每个文本片段生成唯一且确定性的 ID（格式：`{doc_id}_{index:04d}_{hash_8chars}`）
     2. **元数据继承**：将 Document.metadata 复制到每个 Chunk.metadata（source_path, doc_type, title 等）
     3. **添加 chunk_index**：记录 chunk 在文档中的序号（从 0 开始），用于排序和定位
     4. **建立 source_ref**：记录 Chunk.source_ref 指向父 Document.id，支持溯源
-    5. **类型转换**：将 libs.splitter 的 `List[str]` 转换为符合 core.types 契约的 `List[Chunk]` 对象
+    5. **图片引用按需分发**：扫描每个 chunk 文本中的 `[IMAGE: {id}]` 占位符，从 `Document.metadata["images"]` 中提取该 chunk 实际引用的 ImageRef，写入 `chunk.metadata["images"]`（仅含该 chunk 引用的子集）和 `chunk.metadata["image_refs"]`（image_id 列表）。无占位符的 chunk 不含 `images` 字段。⚠️ 不可简单整体继承或丢弃文档级 `images`，否则下游 C7 ImageCaptioner 将无法定位图片路径。
+    6. **类型转换**：将 libs.splitter 的 `List[str]` 转换为符合 core.types 契约的 `List[Chunk]` 对象
 - **修改文件**：
   - `src/ingestion/chunking/document_chunker.py`
   - `src/ingestion/chunking/__init__.py`
@@ -519,13 +583,14 @@
   - `DocumentChunker` 类
   - `__init__(settings: Settings)`：通过 SplitterFactory 获取配置的 splitter 实例
   - `split_document(document: Document) -> List[Chunk]`：完整的转换流程
-  - `_generate_chunk_id(doc_id: str, index: int) -> str`：生成稳定 Chunk ID
-  - `_inherit_metadata(document: Document, chunk_index: int) -> dict`：元数据继承逻辑
+  - `_generate_chunk_id(doc_id: str, index: int, text: str) -> str`：生成稳定 Chunk ID
+  - `_inherit_metadata(document: Document, chunk_index: int, chunk_text: str) -> dict`：元数据继承 + 图片引用按需分发逻辑（需要 chunk_text 来扫描 `[IMAGE: id]` 占位符）
 - **验收标准**：
   - **配置驱动**：通过修改 settings.yaml 中的 splitter 配置（如 chunk_size），产出的 chunk 数量和长度发生相应变化
   - **ID 唯一性**：每个 Chunk 的 ID 在整个文档中唯一
   - **ID 确定性**：同一 Document 对象重复切分产生相同的 Chunk ID 序列
   - **元数据完整性**：Chunk.metadata 包含所有 Document.metadata 字段 + chunk_index 字段
+  - **图片分发正确性**：含 `[IMAGE: id]` 占位符的 chunk 其 `metadata["images"]` 仅包含该 chunk 引用的图片子集；不含占位符的 chunk 无 `images` 字段；`metadata["image_refs"]` 列表与占位符一致
   - **溯源链接**：所有 Chunk.source_ref 正确指向父 Document.id
   - **类型契约**：输出的 Chunk 对象符合 `core/types.py` 中的 Chunk 定义（可序列化、字段完整）
 - **测试方法**：`pytest -q tests/unit/test_document_chunker.py`（使用 FakeSplitter 隔离测试，无需真实 LLM/外部依赖）。

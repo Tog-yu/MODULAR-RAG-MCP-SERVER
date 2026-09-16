@@ -633,6 +633,16 @@ observability:
   enabled: true
   log_file: ./logs/traces.jsonl
 
+# 文档质量预检（挂载在 loader 配置下，详见 C2.5）
+loader:
+  extract_markdown_images: true
+  quality_gate:
+    enabled: true
+    min_valid_char_ratio: 0.80   # 有效字符占比阈值
+    min_text_density: 0.50       # 有效文本页占比阈值
+    preview_pages: 3             # 采样前 N 页
+    min_chars_per_page: 50       # 单页有效字符下限
+
 # Dashboard 管理平台配置
 dashboard:
   enabled: true

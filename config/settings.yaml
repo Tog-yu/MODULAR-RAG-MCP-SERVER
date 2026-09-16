@@ -126,3 +126,14 @@ loader:
   extract_markdown_images: true  # Copy local images from Markdown into the image store
                                  # and insert [IMAGE: {id}] placeholders (multimodal flow)
 
+  # Document Quality Gate (C2.5): pre-load quality inspection.
+  # Samples the first N pages of a PDF and computes valid-char ratio and
+  # text density; documents below both thresholds are rejected BEFORE loading
+  # (Dashboard message: "该文档质量不达标，请检查后重新上传").
+  quality_gate:
+    enabled: true
+    min_valid_char_ratio: 0.80   # valid chars (CJK+alnum) / non-whitespace chars
+    min_text_density: 0.50       # fraction of sampled pages bearing >= 50 valid chars
+    preview_pages: 3             # sample the first N pages
+    min_chars_per_page: 50       # minimum valid chars for a page to count as text-bearing
+

@@ -28,6 +28,7 @@ from src.observability.logger import get_logger
 # Libs layer imports
 from src.libs.loader.file_integrity import SQLiteIntegrityChecker
 from src.libs.loader.loader_factory import LoaderFactory
+from src.libs.loader.quality_gate import DocumentQualityGate, QualityGateConfig
 from src.libs.embedding.embedding_factory import EmbeddingFactory
 from src.libs.vector_store.vector_store_factory import VectorStoreFactory
 
@@ -57,9 +58,11 @@ class PipelineResult:
         image_count: Number of images processed
         vector_ids: List of vector IDs stored
         error: Error message if pipeline failed
+        rejected: True when the file was rejected by the quality gate
+            (spec C2.5) — a business outcome, not a failure.
         stages: Dict of stage names to their individual results
     """
-    
+
     def __init__(
         self,
         success: bool,
@@ -69,6 +72,7 @@ class PipelineResult:
         image_count: int = 0,
         vector_ids: Optional[List[str]] = None,
         error: Optional[str] = None,
+        rejected: bool = False,
         stages: Optional[Dict[str, Any]] = None
     ):
         self.success = success
@@ -78,8 +82,9 @@ class PipelineResult:
         self.image_count = image_count
         self.vector_ids = vector_ids or []
         self.error = error
+        self.rejected = rejected
         self.stages = stages or {}
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
@@ -90,6 +95,7 @@ class PipelineResult:
             "image_count": self.image_count,
             "vector_ids_count": len(self.vector_ids),
             "error": self.error,
+            "rejected": self.rejected,
             "stages": self.stages
         }
 
@@ -140,7 +146,30 @@ class IngestionPipeline:
         # Stage 1: File Integrity
         self.integrity_checker = SQLiteIntegrityChecker(db_path=str(resolve_path("data/db/ingestion_history.db")))
         logger.info("  ✓ FileIntegrityChecker initialized")
-        
+
+        # Stage 1.5: Quality Gate (spec C2.5) — pre-load quality inspection
+        gate_config_dict = (
+            settings.loader.quality_gate
+            if settings.loader is not None and settings.loader.quality_gate
+            else None
+        )
+        if gate_config_dict is not None:
+            gate_cfg = QualityGateConfig(
+                enabled=bool(gate_config_dict.get("enabled", True)),
+                min_valid_char_ratio=float(gate_config_dict.get("min_valid_char_ratio", 0.80)),
+                min_text_density=float(gate_config_dict.get("min_text_density", 0.50)),
+                preview_pages=int(gate_config_dict.get("preview_pages", 3)),
+                min_chars_per_page=int(gate_config_dict.get("min_chars_per_page", 50)),
+                max_sample_chars=int(gate_config_dict.get("max_sample_chars", 20000)),
+            )
+        else:
+            gate_cfg = QualityGateConfig()  # enabled by default
+        self.quality_gate = DocumentQualityGate(gate_cfg)
+        logger.info(
+            f"  ✓ QualityGate initialized (enabled={gate_cfg.enabled}, "
+            f"ratio>={gate_cfg.min_valid_char_ratio}, density>={gate_cfg.min_text_density})"
+        )
+
         # Stage 2: Loader (selected per-file by extension via LoaderFactory)
         self._image_storage_dir = str(resolve_path(f"data/images/{collection}"))
         self._extract_markdown_images = (
@@ -219,7 +248,7 @@ class IngestionPipeline:
         """
         file_path = Path(file_path)
         stages: Dict[str, Any] = {}
-        _total_stages = 6
+        _total_stages = 7
 
         def _notify(stage_name: str, step: int) -> None:
             if on_progress is not None:
@@ -251,7 +280,44 @@ class IngestionPipeline:
             
             stages["integrity"] = {"file_hash": file_hash, "skipped": False}
             logger.info("  ✓ File needs processing")
-            
+
+            # ─────────────────────────────────────────────────────────────
+            # Stage 1.5: Quality Gate (spec C2.5)
+            # ─────────────────────────────────────────────────────────────
+            logger.info("\n🔍 Stage 1.5: Quality Check")
+            _notify("quality_check", 1)  # 挂在 integrity 之后：进度语义上仍属入口检查
+
+            _t0 = time.monotonic()
+            quality_result = self.quality_gate.check(str(file_path))
+            _elapsed = (time.monotonic() - _t0) * 1000.0
+
+            stages["quality_check"] = {
+                **quality_result.to_dict(),
+                "elapsed_ms": round(_elapsed, 2),
+            }
+            logger.info(
+                f"  valid_char_ratio={quality_result.valid_char_ratio:.2%}, "
+                f"text_density={quality_result.text_density:.2%}, "
+                f"sampled_pages={quality_result.sampled_pages}"
+            )
+            if trace is not None:
+                trace.record_stage("quality_check", quality_result.to_dict(), elapsed_ms=_elapsed)
+
+            if not quality_result.passed:
+                reason = quality_result.reason or "该文档质量不达标，请检查后重新上传"
+                logger.warning(f"  ⛔ Rejected by quality gate: {reason}")
+                # 拒绝是预期业务结果而非故障：显式返回，不走异常分支。
+                # 但仍留痕到 integrity 历史表，便于 Dashboard 溯源坏文件。
+                self.integrity_checker.mark_failed(file_hash, str(file_path), "quality_rejected")
+                return PipelineResult(
+                    success=False,
+                    file_path=str(file_path),
+                    doc_id=file_hash,
+                    error=reason,
+                    rejected=True,
+                    stages=stages,
+                )
+
             # ─────────────────────────────────────────────────────────────
             # Stage 2: Document Loading
             # ─────────────────────────────────────────────────────────────

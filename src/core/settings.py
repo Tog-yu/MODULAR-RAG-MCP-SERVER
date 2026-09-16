@@ -185,9 +185,12 @@ class LoaderSettings:
         extract_markdown_images: Whether the Markdown loader copies local
             images into the image store and inserts ``[IMAGE: {id}]``
             placeholders (mirrors the PDF loader's multimodal flow).
+        quality_gate: Optional document quality pre-check configuration
+            (spec C2.5).  None means the gate is disabled.
     """
 
     extract_markdown_images: bool = True
+    quality_gate: Optional[Dict[str, Any]] = None  # 动态配置：enabled/阈值/采样页数
 
 
 @dataclass(frozen=True)
@@ -248,6 +251,7 @@ class Settings:
             loader = _require_mapping(data, "loader", "settings")
             loader_settings = LoaderSettings(
                 extract_markdown_images=bool(loader.get("extract_markdown_images", True)),
+                quality_gate=loader.get("quality_gate"),  # 可选配置，详见 C2.5
             )
 
         settings = cls(

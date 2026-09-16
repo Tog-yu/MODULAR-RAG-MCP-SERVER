@@ -31,11 +31,24 @@ def _make_fake_pipeline() -> object:
     fp.integrity_checker.compute_sha256.return_value = "hash123"
     fp.integrity_checker.should_skip.return_value = False
 
-    # Stage 2: loader
-    fp.loader = MagicMock()
-    fp.loader.load.return_value = Document(
+    # Stage 1.5: quality gate (C2.5) — default pass-through fake
+    from src.libs.loader.quality_gate import QualityCheckResult
+    fake_gate = MagicMock()
+    fake_gate.check.return_value = QualityCheckResult(passed=True, valid_char_ratio=1.0,
+                                                      text_density=1.0, sampled_pages=3)
+    fp.quality_gate = fake_gate
+
+    # Stage 2: loader — pipeline dispatches via LoaderFactory (format-agnostic),
+    # so we patch LoaderFactory.get_loader to return a fake loader instance.
+    fp._image_storage_dir = "/tmp/fake_images"
+    fp._extract_markdown_images = True
+    fake_loader = MagicMock()
+    fake_loader.__class__.__name__ = "PdfLoader"
+    fake_loader.load.return_value = Document(
         id="doc1", text="Hello world. " * 50, metadata={"source_path": "test.pdf", "images": []}
     )
+    fp.loader_factory = MagicMock()
+    fp.loader_factory.get_loader.return_value = fake_loader
 
     # Stage 3: chunker
     chunks = [
@@ -69,14 +82,25 @@ def _make_fake_pipeline() -> object:
     return fp
 
 
-def _collect_progress(fp) -> List[Tuple[str, int, int]]:
+def _run_with_fake_loader(fp, file_path, trace=None, on_progress=None):
+    """Run IngestionPipeline.run with LoaderFactory patched to the fake loader."""
+    from src.ingestion import pipeline as _pl
+    original_get_loader = _pl.LoaderFactory.get_loader
+    _pl.LoaderFactory.get_loader = lambda *a, **kw: fp.loader_factory.get_loader(*a, **kw)
+    try:
+        return IngestionPipeline.run(fp, file_path, trace=trace, on_progress=on_progress)
+    finally:
+        _pl.LoaderFactory.get_loader = original_get_loader
+
+
+def _collect_progress(fp, monkeypatch=None) -> List[Tuple[str, int, int]]:
     """Run pipeline with a callback and return collected calls."""
     calls: List[Tuple[str, int, int]] = []
 
     def on_progress(stage: str, current: int, total: int) -> None:
         calls.append((stage, current, total))
 
-    IngestionPipeline.run(fp, "test.pdf", on_progress=on_progress)
+    _run_with_fake_loader(fp, "test.pdf", on_progress=on_progress)
     return calls
 
 
@@ -91,29 +115,30 @@ class TestPipelineProgressCallback:
         calls = _collect_progress(fp)
         stage_names = [c[0] for c in calls]
         assert "integrity" in stage_names
+        assert "quality_check" in stage_names  # C2.5 Stage 1.5
         assert "load" in stage_names
         assert "split" in stage_names
         assert "transform" in stage_names
         assert "embed" in stage_names
         assert "upsert" in stage_names
 
-    def test_total_is_six(self) -> None:
+    def test_total_is_seven(self) -> None:
         fp = _make_fake_pipeline()
         calls = _collect_progress(fp)
         for _, _, total in calls:
-            assert total == 6
+            assert total == 7  # 6 original stages + quality_check (C2.5)
 
     def test_current_is_monotonically_increasing(self) -> None:
         fp = _make_fake_pipeline()
         calls = _collect_progress(fp)
         currents = [c[1] for c in calls]
         assert currents == sorted(currents)
-        assert currents == list(range(1, 7))
+        assert currents == [1, 1, 2, 3, 4, 5, 6]  # quality_check shares step 1
 
     def test_no_callback_no_crash(self) -> None:
         """on_progress=None should not break anything."""
         fp = _make_fake_pipeline()
-        result = IngestionPipeline.run(fp, "test.pdf", on_progress=None)
+        result = _run_with_fake_loader(fp, "test.pdf", on_progress=None)
         assert result.success
 
     def test_callback_with_trace(self) -> None:
@@ -125,13 +150,13 @@ class TestPipelineProgressCallback:
         def on_progress(stage: str, current: int, total: int) -> None:
             calls.append((stage, current, total))
 
-        IngestionPipeline.run(fp, "test.pdf", trace=trace, on_progress=on_progress)
-        assert len(calls) == 6
-        assert len(trace.stages) >= 5  # trace records from F4
+        _run_with_fake_loader(fp, "test.pdf", trace=trace, on_progress=on_progress)
+        assert len(calls) == 7
+        assert len(trace.stages) >= 6  # trace records from F4 + quality_check
 
     def test_ordering(self) -> None:
         fp = _make_fake_pipeline()
         calls = _collect_progress(fp)
         stage_names = [c[0] for c in calls]
-        expected_order = ["integrity", "load", "split", "transform", "embed", "upsert"]
+        expected_order = ["integrity", "quality_check", "load", "split", "transform", "embed", "upsert"]
         assert stage_names == expected_order
